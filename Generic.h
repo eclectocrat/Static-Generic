@@ -55,8 +55,10 @@
 	#define ARK_CONCAT2(A, B) ARK_CONCAT1(A, B)
 	#define ARK_UNIQUE(PRE) ARK_CONCAT2(PRE, __LINE__)
 
+	// Very rudimentary static assert. Only tested in the usage in this file, will
+	// probably crap out a ton of errors/warnings in another context, so don't use it.
 	template<int* N> struct ark_eat_warning {};
-	#define ARK_STATIC_ASSERT(P)	static int ARK_UNIQUE(error)[(P ? 1 : -1)]; typedef ark_eat_warning<ARK_UNIQUE(error)> ARK_UNIQUE(warning_eater)
+	#define ARK_STATIC_ASSERT(P)	static int ARK_UNIQUE(error)[((P) ? 1 : -1)]; typedef ark_eat_warning<ARK_UNIQUE(error)> ARK_UNIQUE(warning_eater)
 	#define ARK_REFERENCE(T)		T&
 	#define ARK_CONST_REFERENCE(T)	T const& 
 	#define ARK_IS_POD(T)			false
@@ -106,6 +108,57 @@ private:
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+/// DataWrapperBase
+///		Provides the base interface for data objects. Data objects are objects used to keep track of
+///		non-pod data objects lifetime. By using a data wrapper we can ensure that the correct 
+///		destructor will be called for generic data, when this object is destroyed.
+///
+class DataWrapperBase 
+{ 
+	unsigned char * _storage;
+protected:
+	template<typename A>
+	A * rawAssign (A const& a) 
+	{ 
+		A * init = new (_storage) A(a);
+		return init;
+	}
+public: 
+	DataWrapperBase (unsigned char * stor): _storage(stor) { }
+	virtual ~DataWrapperBase ( ) { }
+	virtual  DataWrapperBase * clone (unsigned char *, unsigned char *) = 0;
+	virtual const std::type_info & type ( ) const = 0;
+};
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+/// DataWrapper
+///		Implements the core interface of DataWrapperBase (above) to provide basic object copying
+///		and correct object destruction for any type T.
+///
+template <typename T>
+class DataWrapper : public DataWrapperBase {
+	ARK_STATIC_ASSERT(sizeof(T*) == sizeof(void*));
+	T * _ref;
+public:
+	DataWrapper (T const& t, unsigned char * stor): 
+	DataWrapperBase(stor), _ref(0) { _ref = this->template rawAssign<T>(t); }
+	~ DataWrapper ( ) { _ref->~T(); }
+	
+	DataWrapperBase * clone (unsigned char * wrapmem, unsigned char * stor) {
+		return new (wrapmem) DataWrapper<T>(*_ref, stor);
+	}
+	const std::type_info & type( ) const { return typeid(T); }
+};
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////
 /// Generic
 ///		This struct is a compact (<= 128 bytes) data structure which holds heterogenous data. It is
 ///		designed to pass arbitrary data through message ports without resorting to dynamic memory.
@@ -125,70 +178,15 @@ private:
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-/// DataWrapperBase
-///		Provides the base interface for data objects. Data objects are objects used to keep track of
-///		non-pod data objects lifetime. By using a data wrapper we can ensure that the correct 
-///		destructor will be called for generic data, when this object is destroyed.
-///
-	class DataWrapperBase 
-	{ 
-		unsigned char * _storage;
-	protected:
-		template<typename A>
-		A * rawAssign (A const& a) 
-		{ 
-			A * init = new (_storage) A(a);
-			return init;
-		}
-	public: 
-				 DataWrapperBase (unsigned char * stor): _storage(stor) { }
-		virtual ~DataWrapperBase ( ) { }
-		virtual  DataWrapperBase * clone (unsigned char *, unsigned char *) = 0;
-		virtual const std::type_info & type ( ) const = 0;
-	};
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-/// DataWrapper
-///		Implements the core interface of DataWrapperBase (above) to provide basic object copying
-///		and correct object destruction for any type T.
-///
-	template <typename T>
-	class DataWrapper : public DataWrapperBase {
-		ARK_STATIC_ASSERT(sizeof(T*) == sizeof(void*));
-		T * _ref;
-	public:
-		DataWrapper (T const& t, unsigned char * stor): 
-		DataWrapperBase(stor), _ref(0) { _ref = this->template rawAssign<T>(t); }
-		~ DataWrapper ( ) { _ref->~T(); }
-		
-		DataWrapperBase * clone (unsigned char * wrapmem, unsigned char * stor) {
-			return new (wrapmem) DataWrapper<T>(*_ref, stor);
-		}
-		const std::type_info & type( ) const { return typeid(T); }
-	};
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////////////////////////
 // Private Data Members.
 //
 	// Make sure that the totalSize is capable of containing the bare minimum data.
 	ARK_STATIC_ASSERT(totalSize >= 
-		  sizeof(unsigned char*)
-		+ sizeof(DataWrapperBase*)
-		+ sizeof(unsigned char*)
+		  sizeof(DataWrapperBase*)
 		+ sizeof(DataWrapper<int>));
 		
 	static const unsigned int _buffBytes = totalSize	
-		- sizeof(unsigned char*) 
 		- sizeof(DataWrapperBase*) 
-		- sizeof(unsigned char*)
 		- sizeof(DataWrapper<int>);
 	
 	unsigned char		_buf[_buffBytes];
@@ -200,12 +198,14 @@ private:
 	
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+	// ONLY call this after clearBuffer()!
 	template <unsigned int S>
 	void _copy (Generic<S> const& other)
 	{
 		ARK_STATIC_ASSERT(S <= totalSize);
-		if(other._data)
-			_data = other._data->clone(_dataBuf, _buf);
+		if(other._get_data())
+			_data = other._get_data()->clone(_dataBuf, _buf);
 		
 		else 
 		{ 
@@ -380,6 +380,9 @@ public:
 		// TODO: The name of this function has 'clear' in it.
 		// std::memset(_buf, 0, _buffBytes);
 	}
+	
+	// For private use only! This is necessary for other Generic instances to copy data.
+	DataWrapperBase * _get_data ( ) const { return const_cast<DataWrapperBase*>(_data); }
 };
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -438,8 +441,7 @@ std::ostream& operator << (std::ostream& os, Generic<S> const& note)
 }
 
 // TODO: The type information is lost when reading into a generic, so subsequent
-// calls to getXSafely will invariably throw exceptions.
-//
+// calls to getXChecked will invariably throw exceptions.
 template<unsigned int S>
 std::istream& operator >> (std::istream& is, Generic<S>& note)
 {
